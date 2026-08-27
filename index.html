@@ -49,6 +49,39 @@
 
   main{flex:1;padding:16px 16px 100px;}
 
+  .controls{padding:0 16px;margin-top:2px;}
+  .search-row{position:relative;margin-bottom:10px;}
+  .search-row input{
+    width:100%;background:rgba(247,245,239,0.07);color:var(--paper);border:none;
+    border-radius:9px;padding:11px 14px 11px 36px;font-family:'IBM Plex Sans';font-size:14px;
+  }
+  .search-row input::placeholder{color:var(--muted);}
+  .search-row input:focus{outline:2px solid var(--stamp);outline-offset:1px;}
+  .search-row svg{
+    position:absolute;left:11px;top:50%;transform:translateY(-50%);
+    width:15px;height:15px;color:var(--muted);pointer-events:none;
+  }
+  .group-toggle{
+    display:flex;background:rgba(247,245,239,0.06);border-radius:9px;padding:3px;gap:3px;
+  }
+  .group-toggle button{
+    flex:1;background:none;border:none;color:var(--muted);padding:8px 10px;border-radius:7px;
+    font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:0.05em;
+    text-transform:uppercase;cursor:pointer;
+  }
+  .group-toggle button.active{background:var(--stamp);color:var(--paper);}
+
+  .no-results{
+    margin-top:14vh;text-align:center;color:var(--muted);
+    font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;
+  }
+
+  .event-pill{
+    display:inline-flex;align-items:center;gap:5px;background:rgba(193,68,60,0.14);
+    color:var(--stamp);font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;
+    padding:3px 8px;border-radius:20px;margin-top:5px;letter-spacing:0.02em;
+  }
+
   .empty{
     margin-top:18vh;text-align:center;color:var(--muted);
     font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;
@@ -187,6 +220,16 @@
     <h1>Receipt<span>·</span>Vault</h1>
     <div class="count" id="countLabel">0 receipts</div>
   </header>
+  <div class="controls">
+    <div class="search-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      <input type="text" id="searchInput" placeholder="Search store, event, date…">
+    </div>
+    <div class="group-toggle" id="groupToggle">
+      <button data-mode="month" class="active">By month</button>
+      <button data-mode="event">By event</button>
+    </div>
+  </div>
   <main id="main"></main>
   <button class="fab" id="scanBtn">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
@@ -228,6 +271,14 @@
         <input type="date" id="dateInput">
       </div>
     </div>
+
+    <label>Event (optional)</label>
+    <input type="text" id="eventInput" list="eventList" placeholder="e.g. Christmas, Sarah's birthday, Portugal holiday">
+    <datalist id="eventList">
+      <option value="Christmas"><option value="Birthday"><option value="Holiday">
+      <option value="Wedding"><option value="Anniversary"><option value="New home">
+      <option value="Everyday">
+    </datalist>
 
     <label>Notes (optional)</label>
     <textarea id="notesInput" rows="2" placeholder="Anything else worth remembering"></textarea>
@@ -366,7 +417,12 @@ const cameraInput=document.getElementById('cameraInput');
 const previewWrap=document.getElementById('previewWrap');
 const storeInput=document.getElementById('storeInput');
 const dateInput=document.getElementById('dateInput');
+const eventInput=document.getElementById('eventInput');
 const notesInput=document.getElementById('notesInput');
+const searchInput=document.getElementById('searchInput');
+const groupToggle=document.getElementById('groupToggle');
+let groupMode='month';
+let searchTerm='';
 const addedRow=document.getElementById('addedRow');
 const ocrHint=document.getElementById('ocrHint');
 const deleteBtn=document.getElementById('deleteBtn');
@@ -390,6 +446,7 @@ function openSheet(record, freshImage){
   deleteBtn.style.display = record ? 'block' : 'none';
   storeInput.value = record ? (record.store||'') : '';
   dateInput.value = record ? (record.receiptDate||'') : '';
+  eventInput.value = record ? (record.event||'') : '';
   notesInput.value = record ? (record.notes||'') : '';
   addedRow.textContent = record ? fmtAdded(record.addedAt) : fmtAdded(Date.now());
   ocrHint.textContent = '';
@@ -445,6 +502,7 @@ document.getElementById('saveBtn').onclick=async ()=>{
     addedAt: editing ? editing.addedAt : Date.now(),
     receiptDate: dateInput.value || null,
     store: storeInput.value.trim() || null,
+    event: eventInput.value.trim() || null,
     notes: notesInput.value.trim() || null,
     image: pendingImage || null
   };
@@ -460,27 +518,26 @@ deleteBtn.onclick=async ()=>{
 };
 
 /* ---------- Render list ---------- */
-async function render(){
-  const items=await dbAll();
-  const main=document.getElementById('main');
-  document.getElementById('countLabel').textContent = items.length+' receipt'+(items.length===1?'':'s');
-  if(items.length===0){
-    main.innerHTML=`<div class="empty"><b>No receipts yet</b>Tap "Scan receipt" below to photograph<br>your first one — it stays here, not in your<br>regular photo gallery.</div>`;
-    return;
-  }
-  let html='';
-  let lastMonth=null;
-  for(const it of items){
-    const mk=monthKey(it.addedAt);
-    if(mk!==lastMonth){ html+=`<div class="month-label">${mk}</div>`; lastMonth=mk; }
-    const thumb = it.image
-      ? `<img class="thumb" src="${it.image}" alt="">`
-      : `<div class="thumb placeholder">🧾</div>`;
-    const storeLabel = it.store
-      ? `<span class="store">${escapeHtml(it.store)}</span>`
-      : `<span class="store unknown">Unlabeled store</span>`;
-    const badge = it.store ? `<div class="stamp-badge">${escapeHtml(it.store.slice(0,4).toUpperCase())}</div>` : '';
-    html+=`<div class="card" data-id="${it.id}">
+function matchesSearch(it, term){
+  if(!term) return true;
+  const hay=[
+    it.store||'', it.event||'', it.notes||'',
+    it.receiptDate ? fmtDate(it.receiptDate) : '',
+    it.receiptDate || '',
+    fmtAdded(it.addedAt)
+  ].join(' ').toLowerCase();
+  return hay.includes(term);
+}
+function cardHtml(it){
+  const thumb = it.image
+    ? `<img class="thumb" src="${it.image}" alt="">`
+    : `<div class="thumb placeholder">🧾</div>`;
+  const storeLabel = it.store
+    ? `<span class="store">${escapeHtml(it.store)}</span>`
+    : `<span class="store unknown">Unlabeled store</span>`;
+  const badge = it.store ? `<div class="stamp-badge">${escapeHtml(it.store.slice(0,4).toUpperCase())}</div>` : '';
+  const eventPill = (it.event && groupMode!=='event') ? `<span class="event-pill">${escapeHtml(it.event)}</span>` : '';
+  return `<div class="card" data-id="${it.id}">
       ${thumb}
       <div class="meta">
         ${storeLabel}
@@ -488,10 +545,54 @@ async function render(){
           <span>Added ${fmtAdded(it.addedAt)}</span>
           ${it.receiptDate ? `<span>· Receipt ${fmtDate(it.receiptDate)}</span>` : ''}
         </div>
+        ${eventPill ? `<div>${eventPill}</div>` : ''}
       </div>
       ${badge}
       <div class="zig"></div>
     </div>`;
+}
+async function render(){
+  const all=await dbAll();
+  const term=searchTerm.trim().toLowerCase();
+  const items=all.filter(it=>matchesSearch(it,term));
+  const main=document.getElementById('main');
+  document.getElementById('countLabel').textContent = all.length+' receipt'+(all.length===1?'':'s');
+
+  if(all.length===0){
+    main.innerHTML=`<div class="empty"><b>No receipts yet</b>Tap "Scan receipt" below to photograph<br>your first one — it stays here, not in your<br>regular photo gallery.</div>`;
+    return;
+  }
+  if(items.length===0){
+    main.innerHTML=`<div class="no-results">No receipts match "${escapeHtml(searchTerm)}".</div>`;
+    return;
+  }
+
+  let html='';
+  if(groupMode==='month'){
+    let lastGroup=null;
+    for(const it of items){
+      const gk=monthKey(it.addedAt);
+      if(gk!==lastGroup){ html+=`<div class="month-label">${gk}</div>`; lastGroup=gk; }
+      html+=cardHtml(it);
+    }
+  } else {
+    // group by event: known events first (most recent activity), then "No event" last
+    const groups=new Map();
+    for(const it of items){
+      const key=it.event || '__none__';
+      if(!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(it);
+    }
+    const keys=[...groups.keys()].sort((a,b)=>{
+      if(a==='__none__') return 1;
+      if(b==='__none__') return -1;
+      return a.localeCompare(b);
+    });
+    for(const key of keys){
+      const label = key==='__none__' ? 'No event tagged' : key;
+      html+=`<div class="month-label">${escapeHtml(label)}</div>`;
+      for(const it of groups.get(key)) html+=cardHtml(it);
+    }
   }
   main.innerHTML=html;
   main.querySelectorAll('.card').forEach(card=>{
@@ -502,6 +603,15 @@ async function render(){
     };
   });
 }
+
+searchInput.oninput=()=>{ searchTerm=searchInput.value; render(); };
+groupToggle.onclick=(e)=>{
+  const btn=e.target.closest('button[data-mode]');
+  if(!btn) return;
+  groupMode=btn.dataset.mode;
+  groupToggle.querySelectorAll('button').forEach(b=>b.classList.toggle('active', b===btn));
+  render();
+};
 function escapeHtml(s){
   return s.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
