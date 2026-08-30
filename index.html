@@ -81,6 +81,41 @@
     color:var(--stamp);font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;
     padding:3px 8px;border-radius:20px;margin-top:5px;letter-spacing:0.02em;
   }
+  .status-pill{
+    display:inline-flex;align-items:center;gap:5px;font-family:'IBM Plex Mono',monospace;
+    font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:20px;letter-spacing:0.02em;
+  }
+  .status-pill.resolved{background:rgba(90,168,110,0.16);color:#5AA86E;}
+  .status-pill.pending{background:rgba(200,160,60,0.16);color:#D2A544;}
+  .amount-tag{
+    font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:15px;color:var(--ink);
+    flex:none;text-align:right;
+  }
+  .paidby{color:var(--muted);}
+
+  .amount-field{position:relative;}
+  .amount-field span{
+    position:absolute;left:13px;top:50%;transform:translateY(-50%);color:var(--muted);
+    font-family:'IBM Plex Sans';font-size:15px;pointer-events:none;
+  }
+  .amount-field input{padding-left:26px;}
+
+  .toggle-row{
+    display:flex;align-items:center;justify-content:space-between;
+    background:rgba(247,245,239,0.06);border-radius:9px;padding:12px 14px;margin-top:14px;
+  }
+  .toggle-row span{font-family:'IBM Plex Sans';font-size:14px;}
+  .switch{position:relative;width:44px;height:26px;flex:none;}
+  .switch input{opacity:0;width:0;height:0;}
+  .switch .track{
+    position:absolute;inset:0;background:rgba(247,245,239,0.18);border-radius:20px;transition:background 0.15s;
+  }
+  .switch .track:before{
+    content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:var(--paper);
+    border-radius:50%;transition:transform 0.15s;
+  }
+  .switch input:checked + .track{background:#5AA86E;}
+  .switch input:checked + .track:before{transform:translateX(18px);}
 
   .empty{
     margin-top:18vh;text-align:center;color:var(--muted);
@@ -272,6 +307,29 @@
       </div>
     </div>
 
+    <div class="row2">
+      <div>
+        <label>Amount</label>
+        <div class="amount-field">
+          <span>£</span>
+          <input type="text" inputmode="decimal" id="amountInput" placeholder="0.00">
+        </div>
+      </div>
+      <div>
+        <label>Paid by</label>
+        <input type="text" id="paidByInput" list="payerList" placeholder="e.g. You, Sam">
+        <datalist id="payerList"></datalist>
+      </div>
+    </div>
+
+    <div class="toggle-row">
+      <span>Resolved / processed</span>
+      <label class="switch">
+        <input type="checkbox" id="resolvedInput">
+        <span class="track"></span>
+      </label>
+    </div>
+
     <label>Event (optional)</label>
     <input type="text" id="eventInput" list="eventList" placeholder="e.g. Christmas, Sarah's birthday, Portugal holiday">
     <datalist id="eventList">
@@ -297,18 +355,43 @@
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 /* ---------- IndexedDB ---------- */
-const DB_NAME='receiptVault', STORE='receipts';
+const DB_NAME='receiptVault', STORE='receipts', META='meta', DB_VERSION=2;
 function openDB(){
   return new Promise((res,rej)=>{
-    const req=indexedDB.open(DB_NAME,1);
+    const req=indexedDB.open(DB_NAME,DB_VERSION);
     req.onupgradeneeded=()=>{
       const db=req.result;
       if(!db.objectStoreNames.contains(STORE)){
         db.createObjectStore(STORE,{keyPath:'id'});
       }
+      if(!db.objectStoreNames.contains(META)){
+        db.createObjectStore(META,{keyPath:'key'});
+      }
     };
     req.onsuccess=()=>res(req.result);
     req.onerror=()=>rej(req.error);
+  });
+}
+async function getMeta(key){
+  const db=await openDB();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(META,'readonly');
+    const req=tx.objectStore(META).get(key);
+    req.onsuccess=()=>res(req.result ? req.result.value : []);
+    req.onerror=()=>rej(req.error);
+  });
+}
+async function addMetaValue(key,value){
+  if(!value) return;
+  const list=await getMeta(key);
+  if(list.some(v=>v.toLowerCase()===value.toLowerCase())) return;
+  list.push(value);
+  const db=await openDB();
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(META,'readwrite');
+    tx.objectStore(META).put({key, value:list});
+    tx.oncomplete=()=>res();
+    tx.onerror=()=>rej(tx.error);
   });
 }
 async function dbAll(){
@@ -341,7 +424,31 @@ async function dbDelete(id){
 
 /* ---------- Helpers ---------- */
 const STORES=['Tesco','Asda',"Sainsbury's",'Sainsburys','Morrisons','Aldi','Lidl','Waitrose','Marks & Spencer','M&S','Co-op','Coop','Iceland'];
+const SEED_EVENTS=['Christmas','Birthday','Holiday','Wedding','Anniversary','New home','Everyday'];
 const MONTHS=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+function findAmount(text){
+  const lines=text.split('\n');
+  const moneyRe=/(?:£|\$|€)?\s*(\d{1,4}\.\d{2})\b/;
+  // Prefer a line that says "total" but not "subtotal"/"sub total"/"total items"
+  for(const line of lines){
+    const low=line.toLowerCase();
+    if(low.includes('total') && !low.includes('subtotal') && !low.includes('sub total') && !low.includes('items')){
+      const m=line.match(moneyRe);
+      if(m) return parseFloat(m[1]);
+    }
+  }
+  // Fallback: largest money-like number on the receipt
+  let max=null;
+  const all=text.match(new RegExp(moneyRe,'g'));
+  if(all){
+    for(const a of all){
+      const m=a.match(moneyRe);
+      if(m){ const v=parseFloat(m[1]); if(max===null||v>max) max=v; }
+    }
+  }
+  return max;
+}
 
 function findStore(text){
   const lower=text.toLowerCase();
@@ -418,6 +525,9 @@ const previewWrap=document.getElementById('previewWrap');
 const storeInput=document.getElementById('storeInput');
 const dateInput=document.getElementById('dateInput');
 const eventInput=document.getElementById('eventInput');
+const amountInput=document.getElementById('amountInput');
+const paidByInput=document.getElementById('paidByInput');
+const resolvedInput=document.getElementById('resolvedInput');
 const notesInput=document.getElementById('notesInput');
 const searchInput=document.getElementById('searchInput');
 const groupToggle=document.getElementById('groupToggle');
@@ -427,6 +537,16 @@ const addedRow=document.getElementById('addedRow');
 const ocrHint=document.getElementById('ocrHint');
 const deleteBtn=document.getElementById('deleteBtn');
 const sheetTitle=document.getElementById('sheetTitle');
+
+async function refreshDatalists(){
+  const [customEvents, customPayers] = await Promise.all([getMeta('customEvents'), getMeta('customPayers')]);
+  const eventList=document.getElementById('eventList');
+  const payerList=document.getElementById('payerList');
+  const events=[...SEED_EVENTS];
+  for(const e of customEvents) if(!events.some(x=>x.toLowerCase()===e.toLowerCase())) events.push(e);
+  eventList.innerHTML = events.map(e=>`<option value="${escapeHtml(e)}">`).join('');
+  payerList.innerHTML = customPayers.map(p=>`<option value="${escapeHtml(p)}">`).join('');
+}
 
 scanBtn.onclick=()=>cameraInput.click();
 
@@ -447,7 +567,11 @@ function openSheet(record, freshImage){
   storeInput.value = record ? (record.store||'') : '';
   dateInput.value = record ? (record.receiptDate||'') : '';
   eventInput.value = record ? (record.event||'') : '';
+  amountInput.value = record && record.amount!=null ? record.amount.toFixed(2) : '';
+  paidByInput.value = record ? (record.paidBy||'') : '';
+  resolvedInput.checked = record ? !!record.resolved : false;
   notesInput.value = record ? (record.notes||'') : '';
+  refreshDatalists();
   addedRow.textContent = record ? fmtAdded(record.addedAt) : fmtAdded(Date.now());
   ocrHint.textContent = '';
   renderPreview();
@@ -482,12 +606,14 @@ async function runOCR(dataUrl){
     const {data:{text}}=await Tesseract.recognize(dataUrl,'eng');
     const store=findStore(text);
     const date=findDate(text);
+    const amount=findAmount(text);
     if(store && !storeInput.value) storeInput.value=store;
     if(date && !dateInput.value) dateInput.value=date;
-    if(store||date){
-      ocrHint.textContent=`Auto-filled from receipt: ${[store,date&&fmtDate(date)].filter(Boolean).join(' · ')}. Check and edit if needed.`;
+    if(amount!=null && !amountInput.value) amountInput.value=amount.toFixed(2);
+    if(store||date||amount!=null){
+      ocrHint.textContent=`Auto-filled from receipt: ${[store,date&&fmtDate(date),amount!=null&&('£'+amount.toFixed(2))].filter(Boolean).join(' · ')}. Check and edit if needed.`;
     } else {
-      ocrHint.textContent='Could not read store/date clearly — enter them manually.';
+      ocrHint.textContent='Could not read receipt details clearly — enter them manually.';
     }
   }catch(err){
     ocrHint.textContent='Auto-fill failed — enter store/date manually.';
@@ -497,16 +623,24 @@ async function runOCR(dataUrl){
 }
 
 document.getElementById('saveBtn').onclick=async ()=>{
+  const amountVal=parseFloat(amountInput.value);
   const rec={
     id: editing ? editing.id : 'r_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
     addedAt: editing ? editing.addedAt : Date.now(),
     receiptDate: dateInput.value || null,
     store: storeInput.value.trim() || null,
     event: eventInput.value.trim() || null,
+    amount: isNaN(amountVal) ? null : amountVal,
+    paidBy: paidByInput.value.trim() || null,
+    resolved: resolvedInput.checked,
     notes: notesInput.value.trim() || null,
     image: pendingImage || null
   };
   await dbPut(rec);
+  await Promise.all([
+    addMetaValue('customEvents', rec.event),
+    addMetaValue('customPayers', rec.paidBy)
+  ]);
   closeSheet();
   render();
 };
@@ -521,7 +655,9 @@ deleteBtn.onclick=async ()=>{
 function matchesSearch(it, term){
   if(!term) return true;
   const hay=[
-    it.store||'', it.event||'', it.notes||'',
+    it.store||'', it.event||'', it.notes||'', it.paidBy||'',
+    it.amount!=null ? it.amount.toFixed(2) : '',
+    it.resolved ? 'resolved' : 'pending',
     it.receiptDate ? fmtDate(it.receiptDate) : '',
     it.receiptDate || '',
     fmtAdded(it.addedAt)
@@ -535,8 +671,10 @@ function cardHtml(it){
   const storeLabel = it.store
     ? `<span class="store">${escapeHtml(it.store)}</span>`
     : `<span class="store unknown">Unlabeled store</span>`;
-  const badge = it.store ? `<div class="stamp-badge">${escapeHtml(it.store.slice(0,4).toUpperCase())}</div>` : '';
   const eventPill = (it.event && groupMode!=='event') ? `<span class="event-pill">${escapeHtml(it.event)}</span>` : '';
+  const statusPill = `<span class="status-pill ${it.resolved?'resolved':'pending'}">${it.resolved?'Resolved':'Pending'}</span>`;
+  const paidByLine = it.paidBy ? `<span class="paidby">Paid by ${escapeHtml(it.paidBy)}</span>` : '';
+  const amountTag = it.amount!=null ? `<div class="amount-tag">£${it.amount.toFixed(2)}</div>` : '';
   return `<div class="card" data-id="${it.id}">
       ${thumb}
       <div class="meta">
@@ -545,9 +683,10 @@ function cardHtml(it){
           <span>Added ${fmtAdded(it.addedAt)}</span>
           ${it.receiptDate ? `<span>· Receipt ${fmtDate(it.receiptDate)}</span>` : ''}
         </div>
+        <div class="dates">${statusPill}${paidByLine ? ' '+paidByLine : ''}</div>
         ${eventPill ? `<div>${eventPill}</div>` : ''}
       </div>
-      ${badge}
+      ${amountTag}
       <div class="zig"></div>
     </div>`;
 }
